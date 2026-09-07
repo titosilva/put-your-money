@@ -2,9 +2,13 @@
 // serves the dashboard API + static frontend.
 //
 // By default it uses the synthetic random-walk QuoteSource under a
-// PaperBroker, so it runs with zero configuration. Set APCA_API_KEY_ID and
-// APCA_API_SECRET_KEY (Alpaca paper trading keys) to instead run against
-// Alpaca's live paper-trading market data and execution.
+// PaperBroker, so it runs with zero configuration. In that mode it launches
+// every built-in strategy at once, each with its own isolated portfolio but
+// fed identical prices, so the dashboard can compare them side by side.
+//
+// Set APCA_API_KEY_ID and APCA_API_SECRET_KEY (Alpaca paper trading keys) to
+// instead run a single strategy against Alpaca's live paper-trading market
+// data and execution; pick it with STRATEGY=ma|rsi|macd|bollinger (default ma).
 package main
 
 import (
@@ -22,26 +26,25 @@ import (
 	"github.com/titosilva/put-your-money/internal/broker/synthetic"
 	"github.com/titosilva/put-your-money/internal/domain"
 	"github.com/titosilva/put-your-money/internal/engine"
+	"github.com/titosilva/put-your-money/internal/storage"
 	"github.com/titosilva/put-your-money/internal/storage/memory"
+	"github.com/titosilva/put-your-money/internal/strategy"
+	"github.com/titosilva/put-your-money/internal/strategy/bollinger"
+	"github.com/titosilva/put-your-money/internal/strategy/macd"
 	"github.com/titosilva/put-your-money/internal/strategy/movingaverage"
+	"github.com/titosilva/put-your-money/internal/strategy/rsi"
 )
 
 func main() {
 	symbol := domain.Symbol{Ticker: "AAPL", Class: domain.AssetClassEquity}
-
-	adapter := buildBrokerAdapter(symbol)
 	store := memory.New()
 
-	run := &engine.Run{
-		ID:           "demo-ma-crossover",
-		Strategy:     movingaverage.New(symbol, 5, 10),
-		Broker:       adapter,
-		Store:        store,
-		TickInterval: 5 * time.Second,
-	}
+	runs := buildRuns(symbol, store)
 
 	stop := make(chan struct{})
-	go run.Start(stop)
+	for _, r := range runs {
+		go r.Start(stop)
+	}
 
 	server := api.New(store)
 	mux := http.NewServeMux()
@@ -65,19 +68,65 @@ func main() {
 	log.Println("shutting down")
 }
 
-// buildBrokerAdapter picks Alpaca's paper-trading adapter when API
-// credentials are configured, otherwise falls back to a fully local
-// PaperBroker driven by a synthetic random-walk price feed.
-func buildBrokerAdapter(symbol domain.Symbol) broker.Adapter {
+// buildRuns wires up the strategy Run(s) for this process. With Alpaca
+// credentials configured it runs one strategy against the real paper
+// account; otherwise it runs every built-in strategy concurrently against a
+// shared synthetic feed, each with its own isolated PaperBroker so they can
+// be compared fairly on identical prices.
+func buildRuns(symbol domain.Symbol, store storage.Store) []*engine.Run {
 	keyID := os.Getenv("APCA_API_KEY_ID")
 	secret := os.Getenv("APCA_API_SECRET_KEY")
 	if keyID != "" && secret != "" {
 		log.Println("using Alpaca paper trading adapter")
-		return alpaca.NewPaperAdapter(keyID, secret)
+		adapter := alpaca.NewPaperAdapter(keyID, secret)
+		strat := selectStrategy(os.Getenv("STRATEGY"), symbol)
+		return []*engine.Run{{
+			ID:           "alpaca-" + strat.Name(),
+			Strategy:     strat,
+			Broker:       adapter,
+			Store:        store,
+			TickInterval: 5 * time.Second,
+		}}
 	}
 
-	log.Println("no Alpaca credentials found, using synthetic data + local paper broker")
+	log.Println("no Alpaca credentials found, running all built-in strategies against synthetic data")
 	source := synthetic.New(time.Now().UnixNano())
 	source.SetInitialPrice(symbol.Ticker, 150)
-	return paper.New("local-paper", source, paper.DefaultConfig(10_000))
+
+	strategies := []strategy.Strategy{
+		movingaverage.New(symbol, 5, 10),
+		rsi.New(symbol, 14, 30, 70, 10),
+		macd.New(symbol, 12, 26, 9, 10),
+		bollinger.New(symbol, 20, 2, 10),
+	}
+
+	runs := make([]*engine.Run, len(strategies))
+	for i, strat := range strategies {
+		adapter := newIsolatedPaperBroker(strat.Name(), source)
+		runs[i] = &engine.Run{
+			ID:           strat.Name(),
+			Strategy:     strat,
+			Broker:       adapter,
+			Store:        store,
+			TickInterval: 5 * time.Second,
+		}
+	}
+	return runs
+}
+
+func newIsolatedPaperBroker(name string, source paper.QuoteSource) broker.Adapter {
+	return paper.New(name, source, paper.DefaultConfig(10_000))
+}
+
+func selectStrategy(name string, symbol domain.Symbol) strategy.Strategy {
+	switch name {
+	case "rsi":
+		return rsi.New(symbol, 14, 30, 70, 10)
+	case "macd":
+		return macd.New(symbol, 12, 26, 9, 10)
+	case "bollinger":
+		return bollinger.New(symbol, 20, 2, 10)
+	default:
+		return movingaverage.New(symbol, 5, 10)
+	}
 }
