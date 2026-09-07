@@ -10,6 +10,7 @@ package paper
 
 import (
 	"fmt"
+	"math"
 	"sync"
 
 	"github.com/titosilva/put-your-money/internal/domain"
@@ -84,6 +85,11 @@ func (b *Broker) copyPortfolio() domain.Portfolio {
 
 // SubmitOrder simulates a fill against the given market state's quote for
 // the order's symbol, applying slippage against the strategy and a fee.
+// A Sell that exceeds (or starts from) a flat/long position opens or adds
+// to a short position — needed for strategies like pairs trading that must
+// short one leg. This is a simulator simplification: no margin requirement
+// or borrow cost is modeled, so short size is only bounded by the fee
+// itself ever exceeding available cash, not by any real broker's limits.
 func (b *Broker) SubmitOrder(order domain.Order, state domain.MarketState) (domain.Fill, error) {
 	quote, ok := state.Quote(order.Symbol.Ticker)
 	if !ok {
@@ -125,32 +131,42 @@ func (b *Broker) applyFill(order domain.Order, fillPrice, fee float64) error {
 
 	notional := fillPrice * order.Qty
 
+	var delta float64
 	switch order.Side {
 	case domain.OrderSideBuy:
 		cost := notional + fee
 		if cost > b.portfolio.Cash {
 			return fmt.Errorf("paper broker: insufficient cash for %s: need %.2f, have %.2f", ticker, cost, b.portfolio.Cash)
 		}
-		totalQty := pos.Qty + order.Qty
-		if totalQty > 0 {
-			pos.AvgPrice = (pos.AvgPrice*pos.Qty + fillPrice*order.Qty) / totalQty
-		}
-		pos.Qty = totalQty
 		b.portfolio.Cash -= cost
+		delta = order.Qty
 
 	case domain.OrderSideSell:
-		if order.Qty > pos.Qty {
-			return fmt.Errorf("paper broker: insufficient position in %s: have %.4f, tried to sell %.4f", ticker, pos.Qty, order.Qty)
-		}
-		pos.Qty -= order.Qty
 		b.portfolio.Cash += notional - fee
-		if pos.Qty == 0 {
-			pos.AvgPrice = 0
-		}
+		delta = -order.Qty
 
 	default:
 		return fmt.Errorf("paper broker: unknown order side %q", order.Side)
 	}
+
+	newQty := pos.Qty + delta
+	switch {
+	case pos.Qty == 0:
+		// opening a fresh position (long from Buy, short from Sell).
+		pos.AvgPrice = fillPrice
+	case sameSign(pos.Qty, newQty):
+		if math.Abs(newQty) > math.Abs(pos.Qty) {
+			// adding to the existing long or short exposure.
+			added := math.Abs(newQty) - math.Abs(pos.Qty)
+			pos.AvgPrice = (pos.AvgPrice*math.Abs(pos.Qty) + fillPrice*added) / math.Abs(newQty)
+		}
+		// otherwise partially reducing exposure: avg price is unchanged.
+	default:
+		// fully closed, or flipped from long to short (or vice versa): any
+		// newly opened exposure starts fresh at this fill's price.
+		pos.AvgPrice = fillPrice
+	}
+	pos.Qty = newQty
 
 	if pos.Qty == 0 {
 		delete(b.portfolio.Positions, ticker)
@@ -158,4 +174,8 @@ func (b *Broker) applyFill(order domain.Order, fillPrice, fee float64) error {
 		b.portfolio.Positions[ticker] = pos
 	}
 	return nil
+}
+
+func sameSign(a, b float64) bool {
+	return (a > 0 && b > 0) || (a < 0 && b < 0)
 }

@@ -8,7 +8,8 @@
 //
 // Set APCA_API_KEY_ID and APCA_API_SECRET_KEY (Alpaca paper trading keys) to
 // instead run a single strategy against Alpaca's live paper-trading market
-// data and execution; pick it with STRATEGY=ma|rsi|macd|bollinger (default ma).
+// data and execution; pick it with STRATEGY=ma|rsi|macd|bollinger|pairs
+// (default ma).
 package main
 
 import (
@@ -32,14 +33,16 @@ import (
 	"github.com/titosilva/put-your-money/internal/strategy/bollinger"
 	"github.com/titosilva/put-your-money/internal/strategy/macd"
 	"github.com/titosilva/put-your-money/internal/strategy/movingaverage"
+	"github.com/titosilva/put-your-money/internal/strategy/pairs"
 	"github.com/titosilva/put-your-money/internal/strategy/rsi"
 )
 
 func main() {
 	symbol := domain.Symbol{Ticker: "AAPL", Class: domain.AssetClassEquity}
+	pairSymbol := domain.Symbol{Ticker: "MSFT", Class: domain.AssetClassEquity}
 	store := memory.New()
 
-	runs := buildRuns(symbol, store)
+	runs := buildRuns(symbol, pairSymbol, store)
 
 	stop := make(chan struct{})
 	for _, r := range runs {
@@ -73,13 +76,13 @@ func main() {
 // account; otherwise it runs every built-in strategy concurrently against a
 // shared synthetic feed, each with its own isolated PaperBroker so they can
 // be compared fairly on identical prices.
-func buildRuns(symbol domain.Symbol, store storage.Store) []*engine.Run {
+func buildRuns(symbol, pairSymbol domain.Symbol, store storage.Store) []*engine.Run {
 	keyID := os.Getenv("APCA_API_KEY_ID")
 	secret := os.Getenv("APCA_API_SECRET_KEY")
 	if keyID != "" && secret != "" {
 		log.Println("using Alpaca paper trading adapter")
 		adapter := alpaca.NewPaperAdapter(keyID, secret)
-		strat := selectStrategy(os.Getenv("STRATEGY"), symbol)
+		strat := selectStrategy(os.Getenv("STRATEGY"), symbol, pairSymbol)
 		return []*engine.Run{{
 			ID:           "alpaca-" + strat.Name(),
 			Strategy:     strat,
@@ -92,12 +95,17 @@ func buildRuns(symbol domain.Symbol, store storage.Store) []*engine.Run {
 	log.Println("no Alpaca credentials found, running all built-in strategies against synthetic data")
 	source := synthetic.New(time.Now().UnixNano())
 	source.SetInitialPrice(symbol.Ticker, 150)
+	// pairSymbol tracks symbol's price plus a mean-reverting spread, so the
+	// pairs-trading strategy below actually has something to converge on —
+	// two independent random walks essentially never do.
+	source.SetCompanion(pairSymbol.Ticker, symbol.Ticker, 1.8, 0.1, 0.01)
 
 	strategies := []strategy.Strategy{
 		movingaverage.New(symbol, 5, 10),
 		rsi.New(symbol, 14, 30, 70, 10),
 		macd.New(symbol, 12, 26, 9, 10),
 		bollinger.New(symbol, 20, 2, 10),
+		pairs.New(symbol, pairSymbol, 20, 2, 10),
 	}
 
 	runs := make([]*engine.Run, len(strategies))
@@ -118,7 +126,7 @@ func newIsolatedPaperBroker(name string, source paper.QuoteSource) broker.Adapte
 	return paper.New(name, source, paper.DefaultConfig(10_000))
 }
 
-func selectStrategy(name string, symbol domain.Symbol) strategy.Strategy {
+func selectStrategy(name string, symbol, pairSymbol domain.Symbol) strategy.Strategy {
 	switch name {
 	case "rsi":
 		return rsi.New(symbol, 14, 30, 70, 10)
@@ -126,6 +134,8 @@ func selectStrategy(name string, symbol domain.Symbol) strategy.Strategy {
 		return macd.New(symbol, 12, 26, 9, 10)
 	case "bollinger":
 		return bollinger.New(symbol, 20, 2, 10)
+	case "pairs":
+		return pairs.New(symbol, pairSymbol, 20, 2, 10)
 	default:
 		return movingaverage.New(symbol, 5, 10)
 	}

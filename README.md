@@ -22,14 +22,22 @@ swapped without touching strategy code.
     crosses above its signal line, sell on the cross back below.
   - `internal/strategy/bollinger` — Bollinger Bands mean reversion: buy when
     price drops below the lower band, sell on reversion to the middle band.
-  - All four are classical, price-only, single-asset strategies — no
-    external input, no shorting (the `PaperBroker` is long/flat only for now).
+  - `internal/strategy/pairs` — pairs trading / statistical arbitrage
+    ("distance method", Gatev, Goetzmann & Rouwenhorst, 2006): short the
+    outperformer and long the underperformer when the spread between two
+    normalized price series diverges beyond a threshold, close both legs on
+    reversion to the mean. The first strategy trading more than one symbol,
+    and the first needing short selling.
+  - All five are classical, price-only strategies with no external input.
 - `internal/broker` — the `Adapter` interface: `GetMarketState` +
   `SubmitOrder`. Every execution venue implements this once.
   - `internal/broker/paper` — a fully simulated broker (slippage + fee
     model, in-memory portfolio) that gets quotes from any `QuoteSource`.
+    Supports long and short positions (no margin/borrow-cost modeling).
   - `internal/broker/synthetic` — a random-walk `QuoteSource`, so the whole
-    system runs with zero external credentials for local development.
+    system runs with zero external credentials for local development. Can
+    also generate a "companion" ticker whose price mean-reverts around
+    another's, so pairs trading has something to actually converge on.
   - `internal/broker/alpaca` — wraps Alpaca's Trading + Market Data API,
     hard-wired to Alpaca's **paper trading** endpoint. This is the adapter to
     swap out for a real venue (e.g. a Brazilian corretora) later.
@@ -53,9 +61,10 @@ go run ./cmd/engine
 ```
 
 Serves the dashboard at http://localhost:8080. With no configuration it uses
-a synthetic random-walk price feed and launches **all four built-in
-strategies at once**, each with its own isolated `PaperBroker` portfolio but
-fed identical prices, so the dashboard can compare them side by side.
+a synthetic random-walk price feed (AAPL, plus a synthetic MSFT companion
+for the pairs strategy) and launches **all five built-in strategies at
+once**, each with its own isolated `PaperBroker` portfolio but fed identical
+prices, so the dashboard can compare them side by side.
 
 To run against Alpaca's paper trading market data and simulated execution
 instead, set your Alpaca **paper** API keys (this runs a single strategy,
@@ -64,7 +73,7 @@ since it trades against one real paper account — pick it with `STRATEGY`):
 ```sh
 export APCA_API_KEY_ID=...
 export APCA_API_SECRET_KEY=...
-export STRATEGY=rsi   # ma | rsi | macd | bollinger (default: ma)
+export STRATEGY=rsi   # ma | rsi | macd | bollinger | pairs (default: ma)
 go run ./cmd/engine
 ```
 
@@ -80,10 +89,12 @@ trading integration.
   production venue later — implementing `broker.Adapter` is all that takes.
 - `storage.Store` should move to Postgres/SQLite once runs need to persist
   across restarts.
-- Next classical strategy worth adding is pairs trading / statistical
-  arbitrage (Gatev, Goetzmann & Rouwenhorst) — the first genuinely
-  multi-asset one — but it needs short-selling, so it's blocked on extending
-  `PaperBroker` to support negative (short) positions first.
-- External-input strategies (news sentiment, economic signals) come after
-  the classical set, via `domain.Signal` in `MarketState` — no engine changes
+- External-input strategies (news sentiment, economic signals) are the
+  natural next step, via `domain.Signal` in `MarketState` — no engine changes
   needed, just a `DataSource` producing signals and a strategy reading them.
+- Pairs trading's hedge ratio here is fixed at 1:1 on normalized series (the
+  original "distance method"); a regression-based hedge ratio (spread =
+  A - β·B) would be a natural refinement for real (non-synthetic) pairs.
+- `PaperBroker` short-selling has no margin requirement or borrow cost
+  modeled — fine for comparing strategies' directional calls, but it means
+  short-side P&L is optimistic vs. a real broker.
