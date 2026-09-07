@@ -132,6 +132,11 @@ export APCA_API_SECRET_KEY=...
 go run ./cmd/fetchdata
 ```
 
+See [`LITERATURE.md`](LITERATURE.md) for what the academic literature says
+about each of these strategy families (survey papers, documented returns,
+and — importantly — documented decay), before reading too much into any
+single backtest number above.
+
 ## Status / next steps
 
 - Alpaca paper trading works for US equities; Brazil is not currently a
