@@ -48,7 +48,21 @@ swapped without touching strategy code.
     Postgres/SQLite later without touching engine or API code).
 - `internal/api` — read-only HTTP API over `storage.Store` for the dashboard.
 - `web/` — a minimal static dashboard (equity curve + fills table).
-- `cmd/engine` — wires it all together and serves the dashboard.
+- `internal/backtest` — replays stored historical bars (`HistoricalSource`,
+  a `paper.QuoteSource`) through a strategy at full speed (no wall-clock
+  ticking), producing a `Result` (final equity, return %, max drawdown,
+  trade count). This is the automated-benchmark path: every strategy, new
+  or old, gets evaluated over real historical data in milliseconds instead
+  of needing a live/synthetic run to play out over real time.
+- `cmd/fetchdata` — one-off tool: pulls historical daily bars from Alpaca's
+  Market Data API and writes them to `testdata/historical/<TICKER>.csv`.
+  Run it again to refresh the data; needs `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY`
+  (a market-data-capable key, paper or live — market data access isn't
+  paper/live-specific).
+- `cmd/backtest` — CLI wrapping `internal/backtest`: runs every built-in
+  strategy against `testdata/historical/` and prints a comparison table.
+- `cmd/engine` — wires the live/synthetic path together and serves the
+  dashboard.
 
 The isolation that matters: **strategies never import broker packages, and
 broker adapters never import strategy packages.** Adding a new strategy or a
@@ -81,6 +95,43 @@ No code path in this project submits an order anywhere except Alpaca's own
 paper-trading endpoint or the fully local `PaperBroker` — there is no live
 trading integration.
 
+## Benchmarking strategies against historical data
+
+`testdata/historical/*.csv` holds ~3 years of real daily close prices for
+AAPL and MSFT (fetched once via `cmd/fetchdata`, split-adjusted, committed
+to the repo so benchmarks are reproducible without network access or an
+Alpaca account).
+
+```sh
+go run ./cmd/backtest
+```
+
+prints a table like:
+
+```
+STRATEGY                  FINAL EQUITY  TOTAL RETURN  MAX DRAWDOWN  TRADES
+moving-average-crossover  $11026.07     10.26%        4.25%         184
+rsi-mean-reversion        $10674.24     6.74%         7.05%         8
+macd-crossover            $10572.20     5.72%         5.09%         59
+bollinger-mean-reversion  $10655.06     6.55%         3.45%         26
+pairs-trading             $10192.96     1.93%         10.93%        112
+```
+
+The same path also runs as `go test ./internal/backtest/...` (`-v` to see
+the per-strategy numbers), so every strategy gets checked against real data
+on every test run — a new strategy just needs adding to the `strategies`
+slice in `cmd/backtest/main.go` and the test's slice alongside it.
+
+To refresh or extend the historical data (a longer window, more tickers),
+re-run `cmd/fetchdata` with an Alpaca key pair (paper keys are fine — market
+data access isn't gated by paper vs. live) and commit the updated CSVs:
+
+```sh
+export APCA_API_KEY_ID=...
+export APCA_API_SECRET_KEY=...
+go run ./cmd/fetchdata
+```
+
 ## Status / next steps
 
 - Alpaca paper trading works for US equities; Brazil is not currently a
@@ -98,3 +149,7 @@ trading integration.
 - `PaperBroker` short-selling has no margin requirement or borrow cost
   modeled — fine for comparing strategies' directional calls, but it means
   short-side P&L is optimistic vs. a real broker.
+- The backtest results above are on daily bars over one ~3-year window with
+  default strategy parameters — not a claim any strategy is profitable in
+  general. Worth adding next: multiple historical windows/tickers per
+  strategy, and parameter sweeps, before drawing conclusions from this.
