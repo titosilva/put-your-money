@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Put Your Money — Dashboard</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; background: #0b0d12; color: #e6e8ee; }
+  h1 { font-size: 1.3rem; }
+  select, button { background: #1a1d26; color: #e6e8ee; border: 1px solid #333; padding: 0.4rem 0.6rem; border-radius: 4px; }
+  table { border-collapse: collapse; margin-top: 1rem; width: 100%; }
+  th, td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid #222; font-size: 0.85rem; }
+  canvas { background: #111420; border-radius: 6px; margin-top: 1rem; }
+</style>
+</head>
+<body>
+  <h1>Put Your Money — simulated strategy runs</h1>
+  <div>
+    <select id="runSelect"></select>
+    <button id="refresh">Refresh</button>
+  </div>
+  <canvas id="equityChart" width="900" height="300"></canvas>
+  <h2 style="font-size:1rem;">Fills</h2>
+  <table id="fillsTable">
+    <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Fee</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+async function loadRuns() {
+  const res = await fetch('/api/runs');
+  const runs = await res.json() ?? [];
+  const select = document.getElementById('runSelect');
+  select.innerHTML = '';
+  for (const run of runs) {
+    const opt = document.createElement('option');
+    opt.value = run; opt.textContent = run;
+    select.appendChild(opt);
+  }
+  if (runs.length > 0) loadRun(runs[0]);
+}
+
+async function loadRun(runID) {
+  const [equityRes, fillsRes] = await Promise.all([
+    fetch('/api/runs/equity?run_id=' + encodeURIComponent(runID)),
+    fetch('/api/runs/fills?run_id=' + encodeURIComponent(runID)),
+  ]);
+  const equity = await equityRes.json() ?? [];
+  const fills = await fillsRes.json() ?? [];
+  drawEquity(equity);
+  fillFillsTable(fills);
+}
+
+function drawEquity(points) {
+  const canvas = document.getElementById('equityChart');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (points.length < 2) return;
+
+  const values = points.map(p => p.Equity);
+  const min = Math.min(...values), max = Math.max(...values);
+  const pad = 20;
+  const w = canvas.width - pad * 2, h = canvas.height - pad * 2;
+
+  ctx.strokeStyle = '#5ac8fa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = pad + (i / (points.length - 1)) * w;
+    const y = pad + h - ((p.Equity - min) / (max - min || 1)) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+function fillFillsTable(fills) {
+  const tbody = document.querySelector('#fillsTable tbody');
+  tbody.innerHTML = '';
+  for (const f of fills) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${f.FilledAt}</td><td>${f.Order.Symbol.Ticker}</td><td>${f.Order.Side}</td><td>${f.Qty}</td><td>${f.Price.toFixed(2)}</td><td>${f.Fee.toFixed(4)}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+document.getElementById('refresh').addEventListener('click', () => {
+  const runID = document.getElementById('runSelect').value;
+  if (runID) loadRun(runID);
+});
+document.getElementById('runSelect').addEventListener('change', (e) => loadRun(e.target.value));
+
+loadRuns();
+setInterval(loadRuns, 5000);
+</script>
+</body>
+</html>
