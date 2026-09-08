@@ -28,7 +28,16 @@ swapped without touching strategy code.
     normalized price series diverges beyond a threshold, close both legs on
     reversion to the mean. The first strategy trading more than one symbol,
     and the first needing short selling.
-  - All five are classical, price-only strategies with no external input.
+  - `internal/strategy/pead` — post-earnings-announcement drift (Ball &
+    Brown, 1968): on a large earnings surprise, trade in the direction of
+    the surprise and hold for a fixed drift window. The first strategy
+    driven by external, non-price input rather than price action alone —
+    it reads an earnings-surprise `domain.Signal` from `MarketState`,
+    exactly the mechanism the architecture was designed for. See
+    "Benchmarking" below for how that signal gets there and its real
+    limitations (short history, approximate dates).
+  - The first five are classical, price-only strategies with no external
+    input; `pead` is the first to use one.
 - `internal/broker` — the `Adapter` interface: `GetMarketState` +
   `SubmitOrder`. Every execution venue implements this once.
   - `internal/broker/paper` — a fully simulated broker (slippage + fee
@@ -59,6 +68,11 @@ swapped without touching strategy code.
   Run it again to refresh the data; needs `APCA_API_KEY_ID`/`APCA_API_SECRET_KEY`
   (a market-data-capable key, paper or live — market data access isn't
   paper/live-specific).
+- `cmd/fetchearnings` — one-off tool: pulls historical earnings-surprise
+  data from Finnhub's free API and writes it to
+  `testdata/historical/<TICKER>_earnings.csv`. Needs `FINNHUB_API_KEY`
+  (free signup at finnhub.io, no credit card). See "Benchmarking" below for
+  this data's real limitations.
 - `cmd/backtest` — CLI wrapping `internal/backtest`: runs every built-in
   strategy against `testdata/historical/` and prints a comparison table.
 - `cmd/engine` — wires the live/synthetic path together and serves the
@@ -88,6 +102,9 @@ since it trades against one real paper account — pick it with `STRATEGY`):
 export APCA_API_KEY_ID=...
 export APCA_API_SECRET_KEY=...
 export STRATEGY=rsi   # ma | rsi | macd | bollinger | pairs (default: ma)
+                       # (pead isn't wired into cmd/engine yet: it needs the
+                       # earnings-signal data described below, which only
+                       # cmd/backtest currently loads)
 go run ./cmd/engine
 ```
 
@@ -98,9 +115,10 @@ trading integration.
 ## Benchmarking strategies against historical data
 
 `testdata/historical/*.csv` holds ~3 years of real daily close prices for
-AAPL and MSFT (fetched once via `cmd/fetchdata`, split-adjusted, committed
-to the repo so benchmarks are reproducible without network access or an
-Alpaca account).
+AAPL and MSFT (fetched once via `cmd/fetchdata`, split-adjusted), plus
+`*_earnings.csv` earnings-surprise data for each (fetched via
+`cmd/fetchearnings`) — all committed to the repo so benchmarks are
+reproducible without network access or any API account.
 
 ```sh
 go run ./cmd/backtest
@@ -115,7 +133,33 @@ rsi-mean-reversion        $10674.24     6.74%         7.05%         8
 macd-crossover            $10572.20     5.72%         5.09%         59
 bollinger-mean-reversion  $10655.06     6.55%         3.45%         26
 pairs-trading             $10192.96     1.93%         10.93%        112
+pead-earnings-drift-AAPL  $10232.67     2.33%         2.17%         4
+pead-earnings-drift-MSFT  $9483.41      -5.17%        16.89%        8
 ```
+
+**The `pead` numbers above are the least trustworthy in this table — more
+so than the usual "one window, don't generalize" caveat that applies to
+everything here.** Two real data limitations, not just modeling
+simplifications:
+
+- Finnhub's free tier caps earnings-surprise history to the **last 4
+  quarters** regardless of `limit`/`from`/`to` parameters — there's no free
+  way to get more from Finnhub. That means each of AAPL/MSFT only has ~4
+  earnings events to trade on on top of the 3-year price series, not
+  the dozens a real PEAD test needs. 4–8 trades per symbol (see the table)
+  is not a sample size to draw conclusions from.
+- Finnhub's free tier also doesn't return the actual earnings announcement
+  date, only the fiscal quarter-end. `cmd/fetchearnings` approximates the
+  announcement date as quarter-end + 25 days (`reportLagDays`), which is a
+  genuine guess, not real data — see the comments in
+  `cmd/fetchearnings/main.go`.
+
+Both are Finnhub free-tier limitations specifically, not something
+fundamental to the strategy: Alpha Vantage's `EARNINGS` endpoint returns
+full multi-decade history *with* the real announcement date in one free
+call per ticker (confirmed against its public demo key while researching
+this), and would fix both problems if/when it's worth the switch — a
+second `DataSource`-style fetcher, not an architecture change.
 
 The same path also runs as `go test ./internal/backtest/...` (`-v` to see
 the per-strategy numbers), so every strategy gets checked against real data
@@ -132,6 +176,13 @@ export APCA_API_SECRET_KEY=...
 go run ./cmd/fetchdata
 ```
 
+Similarly, to refresh the earnings-surprise data:
+
+```sh
+export FINNHUB_API_KEY=...
+go run ./cmd/fetchearnings
+```
+
 See [`LITERATURE.md`](LITERATURE.md) for what the academic literature says
 about each of these strategy families (survey papers, documented returns,
 and — importantly — documented decay), before reading too much into any
@@ -145,9 +196,15 @@ single backtest number above.
   production venue later — implementing `broker.Adapter` is all that takes.
 - `storage.Store` should move to Postgres/SQLite once runs need to persist
   across restarts.
-- External-input strategies (news sentiment, economic signals) are the
-  natural next step, via `domain.Signal` in `MarketState` — no engine changes
-  needed, just a `DataSource` producing signals and a strategy reading them.
+- `pead` is the first external-input strategy (via `domain.Signal` in
+  `MarketState`, as planned) — proving the mechanism works, but its
+  backtest is on too few, date-approximated events to trust (see
+  "Benchmarking" above). Switching its data source to Alpha Vantage (full
+  history, real announcement dates, still free) is the natural next step
+  before adding more signal-driven strategies (news/social sentiment).
+- `pead` isn't wired into `cmd/engine` (live/synthetic mode) yet, since
+  that needs a live earnings-calendar poller rather than a static CSV — a
+  natural `DataSource` to add alongside the price feeds.
 - Pairs trading's hedge ratio here is fixed at 1:1 on normalized series (the
   original "distance method"); a regression-based hedge ratio (spread =
   A - β·B) would be a natural refinement for real (non-synthetic) pairs.

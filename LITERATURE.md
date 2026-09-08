@@ -75,6 +75,34 @@ Directly relevant to this repo's own numbers: `cmd/backtest` shows
 strategies over the 2023–2026 AAPL/MSFT window — entirely consistent with
 what the literature would predict for this strategy in a modern sample.
 
+### Post-earnings-announcement drift (PEAD)
+
+**Ball & Brown (1968)** first documented it; the modern construction ranks
+stocks by earnings surprise and goes long the top decile / short the
+bottom, riding the drift for weeks to months on the premise that the market
+underreacts to the news. Historical long-short returns of 10–25%
+annualized, among the most persistent anomalies in finance — but, like
+pairs trading, recent work finds it has weakened and in places reversed in
+the most liquid stocks as it's become well known, the same crowding/decay
+story as above. `internal/strategy/pead` implements a simplified,
+single-symbol version (trade the direction of one stock's own surprise,
+not a cross-sectional decile rank across many stocks) — a scope
+simplification made necessary by only having two tickers of free data,
+not a claim it captures the same edge as the academic construction.
+https://jkatz.caltech.edu/documents/28622/peads.pdf
+
+**A data lesson worth recording alongside the strategy one:** the free
+data source available (Finnhub) caps earnings-surprise history to the
+last 4 quarters and doesn't expose the real announcement date at all —
+`cmd/fetchearnings` approximates it as quarter-end + 25 days. Both weaken
+this specific backtest (see README's "Benchmarking" section for the
+numbers and why they're the least trustworthy in the table) independently
+of whatever the strategy's true academic decay looks like. It's a good
+reminder that a strategy's backtest can look weak or noisy for reasons
+that have nothing to do with whether the underlying anomaly is real —
+data quality is a confound that has to be ruled out before blaming the
+strategy or the decay literature.
+
 ### ML / deep reinforcement learning
 
 The surveys converge on a warning more than a "it works" result: DRL

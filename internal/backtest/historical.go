@@ -53,6 +53,52 @@ func LoadCSV(path string) ([]bar, error) {
 	return bars, nil
 }
 
+// Event is a single external, non-price data point (an earnings surprise,
+// a news-sentiment score, ...) tied to a date — the historical-replay
+// equivalent of a live DataSource producing a domain.Signal.
+type Event struct {
+	Date  time.Time
+	Value float64
+}
+
+// LoadEventsCSV reads a "date,value" CSV (first column any date parseable
+// by time.Parse("2006-01-02", ...), second a float) into a sorted []Event.
+// Used for signal data like testdata/historical/<TICKER>_earnings.csv,
+// where the caller picks which column holds the date and which the value
+// before calling this (see cmd/fetchearnings' approx_report_date +
+// surprise_percent columns).
+func LoadEventsCSV(path string, dateCol, valueCol int) ([]Event, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("backtest: opening %s: %w", path, err)
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("backtest: reading %s: %w", path, err)
+	}
+	if len(rows) < 2 {
+		return nil, fmt.Errorf("backtest: %s has no data rows", path)
+	}
+
+	events := make([]Event, 0, len(rows)-1)
+	for _, row := range rows[1:] {
+		date, err := time.Parse("2006-01-02", row[dateCol])
+		if err != nil {
+			return nil, fmt.Errorf("backtest: parsing date %q in %s: %w", row[dateCol], path, err)
+		}
+		var value float64
+		if _, err := fmt.Sscanf(row[valueCol], "%g", &value); err != nil {
+			return nil, fmt.Errorf("backtest: parsing value %q in %s: %w", row[valueCol], path, err)
+		}
+		events = append(events, Event{Date: date, Value: value})
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].Date.Before(events[j].Date) })
+	return events, nil
+}
+
 // HistoricalSource replays stored bars for one or more symbols in lockstep,
 // one row per call to GetMarketState — it implements paper.QuoteSource, so
 // it's a drop-in replacement for the synthetic or Alpaca-backed data feeds
@@ -62,6 +108,8 @@ type HistoricalSource struct {
 	bars    map[string][]bar
 	dates   []time.Time // union of all dates across symbols, sorted ascending
 	cursor  int
+
+	signals map[time.Time]map[string]float64 // date -> signal name -> value
 }
 
 // NewHistoricalSource loads testdata/historical/<ticker>.csv for each given
@@ -117,6 +165,36 @@ func NewHistoricalSource(dataDir string, symbols ...domain.Symbol) (*HistoricalS
 	}, nil
 }
 
+// AttachSignal maps each event onto the nearest trading date on or after
+// its own date (an earnings report on a weekend lands on the next trading
+// day, same as a real feed would only be able to act on it then) and makes
+// it available under `name` in MarketState.Signals on that date. An event
+// whose date falls after the last replayed date is dropped.
+func (s *HistoricalSource) AttachSignal(name string, events []Event) {
+	if s.signals == nil {
+		s.signals = make(map[time.Time]map[string]float64)
+	}
+	for _, e := range events {
+		date := s.nearestTradingDateOnOrAfter(e.Date)
+		if date.IsZero() {
+			continue
+		}
+		if s.signals[date] == nil {
+			s.signals[date] = make(map[string]float64)
+		}
+		s.signals[date][name] = e.Value
+	}
+}
+
+func (s *HistoricalSource) nearestTradingDateOnOrAfter(target time.Time) time.Time {
+	for _, d := range s.dates {
+		if !d.Before(target) {
+			return d
+		}
+	}
+	return time.Time{}
+}
+
 // Len returns the number of ticks available to replay.
 func (s *HistoricalSource) Len() int { return len(s.dates) }
 
@@ -153,9 +231,14 @@ func (s *HistoricalSource) GetMarketState(symbols []domain.Symbol) (domain.Marke
 		}
 	}
 
+	signals := make(map[string]domain.Signal, len(s.signals[date]))
+	for name, value := range s.signals[date] {
+		signals[name] = domain.Signal{Name: name, Value: value, Timestamp: date}
+	}
+
 	return domain.MarketState{
 		Timestamp: date,
 		Quotes:    quotes,
-		Signals:   map[string]domain.Signal{},
+		Signals:   signals,
 	}, nil
 }

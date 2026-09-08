@@ -10,7 +10,15 @@ import (
 	"github.com/titosilva/put-your-money/internal/strategy/macd"
 	"github.com/titosilva/put-your-money/internal/strategy/movingaverage"
 	"github.com/titosilva/put-your-money/internal/strategy/pairs"
+	"github.com/titosilva/put-your-money/internal/strategy/pead"
 	"github.com/titosilva/put-your-money/internal/strategy/rsi"
+)
+
+// earnings CSV columns written by cmd/fetchearnings: period(0),
+// approx_report_date(1), estimate(2), actual(3), surprise(4), surprise_percent(5).
+const (
+	earningsDateCol  = 1
+	earningsValueCol = 5
 )
 
 // TestBacktest_AllStrategiesRunCleanly is the automated benchmark: it
@@ -31,6 +39,15 @@ func TestBacktest_AllStrategiesRunCleanly(t *testing.T) {
 		t.Fatal("historical source has no data")
 	}
 
+	for _, sym := range []domain.Symbol{symbol, pairSymbol} {
+		events, err := backtest.LoadEventsCSV(
+			"../../testdata/historical/"+sym.Ticker+"_earnings.csv", earningsDateCol, earningsValueCol)
+		if err != nil {
+			t.Fatalf("loading earnings data for %s: %v", sym.Ticker, err)
+		}
+		source.AttachSignal(sym.Ticker+":earnings_surprise_pct", events)
+	}
+
 	const initialCash = 10_000
 	strategies := []strategy.Strategy{
 		movingaverage.New(symbol, 5, 10),
@@ -38,6 +55,8 @@ func TestBacktest_AllStrategiesRunCleanly(t *testing.T) {
 		macd.New(symbol, 12, 26, 9, 10),
 		bollinger.New(symbol, 20, 2, 10),
 		pairs.New(symbol, pairSymbol, 20, 2, 10),
+		pead.New(symbol, 2, 20, 10),
+		pead.New(pairSymbol, 2, 20, 10),
 	}
 
 	for _, strat := range strategies {
